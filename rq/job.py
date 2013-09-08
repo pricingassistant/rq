@@ -425,9 +425,9 @@ class Job(object):
         """Jobs may have a waitlist. Jobs in this waitlist are enqueued
         only if the dependency job is successfully performed. We maintain this
         waitlist in Redis, with key that looks something like:
-            
+
             rq:job:job_id:waitlist = ['job_id_1', 'job_id_2']
-        
+
         This method puts the job on it's dependency's waitlist.
         """
         # TODO: This can probably be pipelined
@@ -445,3 +445,90 @@ class Job(object):
         return hash(self.id)
 
 _job_stack = LocalStack()
+
+
+"""
+  This is our custom optimized Job class.
+  Main differences from rq:
+   - func_name and args are saved in description as JSON
+   - func can be passed as a straight string with our custom .start() constructor added automatically
+"""
+
+RqJob = Job
+
+import ujson as json
+class OxJob(RqJob):
+
+    @classmethod
+    def create(cls, func, args=None, kwargs=None, connection=None,
+             result_ttl=None, status=None, description=None, dependency=None):
+
+        job = cls(connection=connection)
+
+        job.description = json.dumps([func, args or (), kwargs or {}])
+        job.result_ttl = result_ttl
+        job._status = status
+
+        # dependency could be job instance or id
+        if dependency is not None:
+            job._dependency_id = dependency.id if isinstance(dependency, OxJob) else dependency
+
+        return job
+
+    # Job execution
+    def perform(self):  # noqa
+
+        """Invokes the job function with the job arguments."""
+        _job_stack.push(self.id)
+        try:
+            desc = json.loads(self.description)
+            module_name, func_name = desc[0].rsplit('.', 1)
+            module = importlib.import_module(module_name)
+            func = getattr(module, func_name).start
+            self._result = func(desc[0], desc[1], **desc[2])
+        finally:
+            assert self.id == _job_stack.pop()
+        return self._result
+
+    def __str__(self):
+        return '<OxJob %s: %s>' % (self.id, self.description[0:45])
+
+    def dump(self):
+        dumped = RqJob.dump(self)
+        dumped["data"] = None
+        return dumped
+
+
+    # Persistence
+    def refresh(self, safe=False):  # noqa
+
+        key = self.key
+        obj = decode_redis_hash(self.connection.hgetall(key))
+
+        if len(obj) == 0:
+            raise NoSuchJobError('No such job: %s' % (key,))
+
+        def to_date(date_str):
+            if date_str is None:
+                return None
+            else:
+                return times.to_universal(as_text(date_str))
+
+        self.created_at = to_date(as_text(obj.get('created_at')))
+        self.origin = as_text(obj.get('origin'))
+        self.description = as_text(obj.get('description'))
+        self.enqueued_at = to_date(as_text(obj.get('enqueued_at')))
+        self.ended_at = to_date(as_text(obj.get('ended_at')))
+        self._result = unpickle(obj.get('result')) if obj.get('result') else None  # noqa
+        self.exc_info = obj.get('exc_info')
+        self.timeout = int(obj.get('timeout')) if obj.get('timeout') else None
+        self.result_ttl = int(obj.get('result_ttl')) if obj.get('result_ttl') else None # noqa
+        self._status = as_text(obj.get('status') if obj.get('status') else None)
+        self._dependency_id = as_text(obj.get('dependency_id', None))
+        self.meta = unpickle(obj.get('meta')) if obj.get('meta') else {}
+
+
+
+# Monkey-patch over the Job class
+Job = OxJob
+
