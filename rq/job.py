@@ -465,7 +465,7 @@ class OxJob(RqJob):
 
         job = cls(connection=connection)
 
-        job.description = json.dumps([func, args or (), kwargs or {}])
+        job.description = json.dumps([func, args or {}, kwargs or {}])
         job.result_ttl = result_ttl
         job._status = status
 
