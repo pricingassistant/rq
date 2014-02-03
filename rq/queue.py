@@ -307,7 +307,7 @@ class Queue(object):
         return job
 
     @classmethod
-    def dequeue_any(cls, queues, timeout, connection=None):
+    def dequeue_any(cls, queues, timeout, connection=None, max_stack=100):
         """Class method returning the Job instance at the front of the given
         set of Queues, where the order of the queues is important.
 
@@ -327,9 +327,12 @@ class Queue(object):
         try:
             job = Job.fetch(job_id, connection=connection)
         except NoSuchJobError:
+            # Avoid max recursion errors
+            if max_stack == 0:
+                raise DequeueTimeout
             # Silently pass on jobs that don't exist (anymore),
             # and continue by reinvoking the same function recursively
-            return cls.dequeue_any(queues, timeout, connection=connection)
+            return cls.dequeue_any(queues, timeout, connection=connection, max_stack=max_stack-1)
         except UnpickleError as e:
             # Attach queue information on the exception for improved error
             # reporting
